@@ -3,9 +3,7 @@ export async function exponentialRetry<T>(
   maxRetries = 4,
   baseDelay = 500,
 ): Promise<T> {
-  let attempt = 0;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (err: any) {
@@ -15,7 +13,6 @@ export async function exponentialRetry<T>(
       }
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => setTimeout(r, baseDelay * 2 ** attempt));
-      attempt += 1;
     }
   }
-} 
+}

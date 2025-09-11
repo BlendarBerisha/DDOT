@@ -6,30 +6,33 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || 'sk-dummy-key-for-development',
 });
 
+// Mise en cache du modèle sélectionné pour éviter les appels répétitifs
+let cachedModel: string | null = null;
+
+async function selectModel(): Promise<string> {
+  if (cachedModel) return cachedModel;
+  try {
+    // Vérifie la disponibilité sans consommer de tokens
+    await openai.models.retrieve('gpt-4o-mini');
+    console.log('✅ Modèle gpt-4o-mini disponible');
+    cachedModel = 'gpt-4o-mini';
+  } catch (error: any) {
+    if (error.status === 404 || error.message?.includes('gpt-4o-mini')) {
+      console.log('⚠️ Modèle gpt-4o-mini non disponible, utilisation de gpt-3.5-turbo');
+      cachedModel = 'gpt-3.5-turbo';
+    } else {
+      throw error;
+    }
+  }
+  return cachedModel;
+}
+
 export async function chatCompletion(
   zone: string,
   reglement: string,
   parcelLabel: string,
 ): Promise<string> {
-  // Fonction helper pour choisir le modèle avec fallback
-  const getModel = async (): Promise<string> => {
-    try {
-      // Test rapide avec gpt-4o-mini
-      await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: 'test' }],
-        max_tokens: 1
-      });
-      return 'gpt-4o-mini';
-    } catch (error: any) {
-      if (error.status === 404 || error.message?.includes('gpt-4o-mini')) {
-        return 'gpt-3.5-turbo';
-      }
-      throw error;
-    }
-  };
-
-  const selectedModel = await getModel();
+  const selectedModel = await selectModel();
   console.log(`🤖 Modèle sélectionné pour analyse simple: ${selectedModel}`);
   
   const response = await exponentialRetry(async () => {
@@ -64,29 +67,8 @@ export async function deepSearchAnalysis(
   additionalContext?: string
 ): Promise<string> {
   console.log('🔍 Démarrage de l\'analyse approfondie pour', parcelLabel);
-  
-  // Fonction helper pour choisir le modèle avec fallback
-  const getModel = async (): Promise<string> => {
-    try {
-      // Test rapide avec gpt-4o-mini
-      await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: 'test' }],
-        max_tokens: 1
-      });
-      console.log('✅ Modèle gpt-4o-mini disponible');
-      return 'gpt-4o-mini';
-          } catch (error: any) {
-        if (error.status === 404 || error.message?.includes('gpt-4o-mini')) {
-          console.log('⚠️ Modèle gpt-4o-mini non disponible, utilisation de gpt-3.5-turbo');
-          return 'gpt-3.5-turbo';
-        }
-        throw error;
-      }
-  };
-  
   try {
-    const selectedModel = await getModel();
+    const selectedModel = await selectModel();
     console.log(`🤖 Modèle sélectionné: ${selectedModel}`);
     
     // Étape 1: Analyse préliminaire du zonage
@@ -269,4 +251,4 @@ export async function callOpenAI(params: {
     }
     throw error;
   }
-} 
+}
