@@ -209,25 +209,37 @@ class OpenAIService {
    * @returns {string} Prompt formaté
    */
   buildUrbanAnalysisPrompt(data) {
-    const { rdppfConstraints, zones, communalRegulations, parcel } = data;
+    const { rdppfConstraints, zones, communalRegulations } = data;
 
-    const rdppfData = rdppfConstraints?.map(c => 
+    const parcelInfo = data.parcel || {
+      address: data.searchQuery || 'Non spécifiée',
+      commune: data.parcelDetails?.municipality || data.searchResult?.municipality || 'Non spécifiée'
+    };
+
+    const rdppfData = rdppfConstraints?.map(c =>
       `- ${c.title}: ${c.description} (${c.severity})`
     ).join('\n') || 'Aucune contrainte RDPPF détectée';
 
-    const zoneData = zones ? Object.entries(zones).map(([zone, info]) => 
-      `- Zone ${zone}: ${info.description || 'Description non disponible'}`
-    ).join('\n') : 'Zonage non déterminé';
+    let zoneData = 'Zonage non déterminé';
+    if (zones && Object.keys(zones).length > 0) {
+      zoneData = Object.entries(zones).map(([zone, info]) =>
+        `- Zone ${zone}: ${info.description || info.nutzungszone || 'Description non disponible'}`
+      ).join('\n');
+    } else if (data.rdppfData?.zoneAffectation?.designation) {
+      zoneData = `- ${data.rdppfData.zoneAffectation.designation}`;
+    } else if (data.buildingZone?.nutzungszone) {
+      zoneData = `- ${data.buildingZone.nutzungszone}`;
+    }
 
-    const regulationData = communalRegulations?.map(r => 
+    const regulationData = communalRegulations?.map(r =>
       `- ${r.title}: ${r.content}`
     ).join('\n') || 'Règlement communal non analysé';
 
     return `Vous êtes un expert urbaniste suisse spécialisé dans l'analyse de contraintes réglementaires.
 
 DONNÉES DE LA PARCELLE :
-Adresse: ${parcel.address || 'Non spécifiée'}
-Commune: ${parcel.commune || 'Non spécifiée'}
+Adresse: ${parcelInfo.address}
+Commune: ${parcelInfo.commune}
 
 CONTRAINTES RDPPF :
 ${rdppfData}
