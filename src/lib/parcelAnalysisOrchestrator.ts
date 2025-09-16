@@ -99,7 +99,7 @@ export async function performComprehensiveAnalysis(searchQuery: string): Promise
         return analysis;
       }
     } catch (error) {
-      analysis.errors.push(`Erreur recherche parcelle: ${error}`);
+      analysis.errors.push(`Erreur recherche parcelle: ${toErrorMessage(error)}`);
     }
     
     if (!analysis.searchResult) {
@@ -108,10 +108,40 @@ export async function performComprehensiveAnalysis(searchQuery: string): Promise
       analysis.formattedForAI = generateErrorMessage(searchQuery, analysis.errors);
       return analysis;
     }
-    
+
+    // Géocodage complémentaire pour fiabiliser les coordonnées
+    console.log('🧭 Géocodage complémentaire...');
+    try {
+      const geocoded = await geocodeAddress(searchQuery);
+      if (geocoded) {
+        analysis.geocodeResult = geocoded;
+        console.log(`✅ Géocodage précis via ${geocoded.source}`);
+      } else if (analysis.searchResult?.municipality) {
+        const fallback = getFallbackCoordinates(analysis.searchResult.municipality);
+        if (fallback) {
+          analysis.geocodeResult = fallback;
+          console.log(`⚠️ Géocodage approximatif utilisé (${fallback.source})`);
+        }
+      }
+
+      if (!analysis.geocodeResult && analysis.searchResult) {
+        analysis.geocodeResult = {
+          coordinates: analysis.searchResult.center,
+          address: analysis.searchResult.number || searchQuery,
+          municipality: analysis.searchResult.municipality || '',
+          canton: analysis.searchResult.canton,
+          accuracy: 'approximate',
+          source: 'GeoAdmin Search',
+        };
+        console.log('⚠️ Utilisation des coordonnées retournées par la recherche GeoAdmin');
+      }
+    } catch (error) {
+      analysis.errors.push(`Erreur géocodage: ${toErrorMessage(error)}`);
+    }
+
     const { x, y } = analysis.searchResult.center;
     const egrid = analysis.searchResult.egrid;
-    
+
     // ÉTAPE 2: RDPPF
     console.log('📑 Étape 2/5: RDPPF...');
     try {
@@ -179,29 +209,109 @@ export async function performComprehensiveAnalysis(searchQuery: string): Promise
           
           console.log(`📑 RDPPF analysé: ${analysis.rdppfConstraints.length} contraintes extraites`);
         } catch (rdppfError: any) {
-          console.log(`❌ Étape 2 échouée - Erreur RDPPF: ${rdppfError.message}`);
-          console.log(`📑 Stack: ${rdppfError.stack?.substring(0, 200)}...`);
-          analysis.errors.push(`RDPPF: ${rdppfError.message}`);
+          const rdppfMessage = toErrorMessage(rdppfError);
+          console.log(`❌ Étape 2 échouée - Erreur RDPPF: ${rdppfMessage}`);
+          const stackPreview = typeof rdppfError?.stack === 'string' ? rdppfError.stack.substring(0, 200) : '';
+          if (stackPreview) {
+            console.log(`📑 Stack: ${stackPreview}...`);
+          }
+          analysis.errors.push(`RDPPF: ${rdppfMessage}`);
         }
       } else {
         console.log('⚠️ Pas d\'EGRID disponible pour construire l\'URL RDPPF');
       }
     } catch (error) {
-      analysis.errors.push(`Erreur RDPPF: ${error}`);
+      analysis.errors.push(`Erreur RDPPF: ${toErrorMessage(error)}`);
     }
     
-    // ÉTAPE 3: Zones et contraintes
-    console.log('🗺️ Étape 3/5: Zones et contraintes...');
+    // ÉTAPE 3: Données territoriales complémentaires
+    console.log('🗺️ Étape 3/5: Données territoriales...');
     try {
-      analysis.zones = await identifyZonesAndConstraints(x, y);
-      if (Object.keys(analysis.zones).length > 0) {
-        successCount++;
-        console.log('✅ Étape 3 réussie: Zones GeoAdmin identifiées');
+      const [
+        parcelDetailsResult,
+        zonesResult,
+        geologicalResult,
+        buildingZoneResult,
+        additionalDataResult,
+        plrResult,
+      ] = await Promise.allSettled([
+        getParcelDetails(x, y),
+        identifyZonesAndConstraints(x, y),
+        getGeologicalInfo(x, y),
+        getBuildingZoneInfo(x, y),
+        getAllAdditionalData(x, y),
+        egrid ? getPLRRestrictions(egrid) : Promise.resolve<PLRData | null>(null),
+      ] as const);
+
+      let step3Success = false;
+
+      if (parcelDetailsResult.status === 'fulfilled' && parcelDetailsResult.value) {
+        analysis.parcelDetails = parcelDetailsResult.value;
+        step3Success = true;
+        console.log('✅ Détails de parcelle récupérés');
+      } else if (parcelDetailsResult.status === 'rejected') {
+        analysis.errors.push(`Détails parcelle: ${toErrorMessage(parcelDetailsResult.reason)}`);
+      }
+
+      if (zonesResult.status === 'fulfilled') {
+        analysis.zones = zonesResult.value;
+        if (Object.keys(analysis.zones).length > 0) {
+          step3Success = true;
+          console.log('✅ Zones GeoAdmin identifiées');
+        } else {
+          console.log('❌ Aucune zone GeoAdmin trouvée');
+        }
       } else {
-        console.log('❌ Étape 3 échouée: Aucune zone GeoAdmin trouvée');
+        analysis.errors.push(`Zones: ${toErrorMessage(zonesResult.reason)}`);
+      }
+
+      if (geologicalResult.status === 'fulfilled') {
+        analysis.geologicalInfo = geologicalResult.value;
+        if (Object.keys(analysis.geologicalInfo).length > 0) {
+          step3Success = true;
+          console.log('✅ Informations géologiques disponibles');
+        }
+      } else {
+        analysis.errors.push(`Infos géologiques: ${toErrorMessage(geologicalResult.reason)}`);
+      }
+
+      if (buildingZoneResult.status === 'fulfilled' && buildingZoneResult.value) {
+        analysis.buildingZone = buildingZoneResult.value;
+        if (Object.keys(analysis.buildingZone).length > 0) {
+          step3Success = true;
+          console.log('✅ Zone de construction identifiée');
+        }
+      } else if (buildingZoneResult.status === 'rejected') {
+        analysis.errors.push(`Zone de construction: ${toErrorMessage(buildingZoneResult.reason)}`);
+      }
+
+      if (additionalDataResult.status === 'fulfilled') {
+        const additionalValue = additionalDataResult.value;
+        analysis.additionalData = additionalValue.results;
+        console.log(`📈 ${additionalValue.summary}`);
+        if (analysis.additionalData.some((entry) => entry.success)) {
+          step3Success = true;
+        }
+      } else {
+        analysis.errors.push(`Données supplémentaires: ${toErrorMessage(additionalDataResult.reason)}`);
+      }
+
+      if (plrResult.status === 'fulfilled' && plrResult.value) {
+        analysis.plrData = plrResult.value;
+        step3Success = true;
+        console.log('✅ Restrictions PLR récupérées');
+      } else if (plrResult.status === 'rejected') {
+        analysis.errors.push(`PLR: ${toErrorMessage(plrResult.reason)}`);
+      }
+
+      if (step3Success) {
+        successCount++;
+        console.log('✅ Étape 3 réussie: Données territoriales consolidées');
+      } else {
+        console.log('❌ Étape 3 échouée: Données territoriales indisponibles');
       }
     } catch (error) {
-      analysis.errors.push(`Erreur zones: ${error}`);
+      analysis.errors.push(`Erreur données territoriales: ${toErrorMessage(error)}`);
     }
     
     // ÉTAPE 4: Règlements communaux
@@ -293,7 +403,7 @@ export async function performComprehensiveAnalysis(searchQuery: string): Promise
           }
         }
       } catch (error) {
-        analysis.errors.push(`Erreur règlements: ${error}`);
+        analysis.errors.push(`Erreur règlements: ${toErrorMessage(error)}`);
       }
     }
     
@@ -355,7 +465,8 @@ export async function performComprehensiveAnalysis(searchQuery: string): Promise
         }
       }
     } catch (error) {
-      analysis.errors.push(`Erreur calcul densité: ${error}`);
+      const densityError = toErrorMessage(error);
+      analysis.errors.push(`Erreur calcul densité: ${densityError}`);
       console.error('❌ Erreur calcul densité:', error);
     }
     
@@ -422,7 +533,12 @@ function formatForOpenAI(analysis: ComprehensiveParcelAnalysis): string {
     formatted += `## 4. RÈGLEMENTS COMMUNAUX\n\n`;
     formatted += formatRegulationsForAnalysis(analysis.communalRegulations);
   }
-  
+
+  if (analysis.additionalData.length > 0) {
+    formatted += formatAdditionalDataForAI(analysis.additionalData);
+    formatted += '\n';
+  }
+
   // 4b. TABLEAU DE CONTRAINTES FUSIONNÉES
   if (analysis.communalConstraints.length || analysis.rdppfConstraints.length || analysis.plrData || Object.keys(analysis.buildingZone).length) {
     formatted += `## 4b. SYNTHÈSE DES CONTRAINTES\n\n`;
@@ -494,8 +610,18 @@ function generateErrorMessage(searchQuery: string, errors: string[]): string {
   message += `- Vérifiez que l'adresse ou le numéro de parcelle est correct\n`;
   message += `- Essayez avec une formulation différente (ex: "Rue du Village 10, Sion" ou "Parcelle 542, Martigny")\n`;
   message += `- Contactez les services communaux pour obtenir des informations précises\n\n`;
-  
+
   return message;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 /**
@@ -544,7 +670,7 @@ export async function performQuickAnalysis(searchQuery: string): Promise<Compreh
       if (egrid) {
         const rdppfUrl = `https://rdppfvs.geopol.ch/extract/pdf?EGRID=${egrid}&LANG=fr`;
         promises.push(analyzeRdppf(rdppfUrl).catch(err => {
-          console.log(`⚠️ RDPPF rapide échoué: ${err.message}`);
+          console.log(`⚠️ RDPPF rapide échoué: ${toErrorMessage(err)}`);
           return [];
         }));
       }
@@ -593,7 +719,7 @@ export async function performQuickAnalysis(searchQuery: string): Promise<Compreh
     console.log(`⚡ Analyse rapide terminée en ${analysis.processingTime}ms`);
     
   } catch (error) {
-    analysis.errors.push(`Erreur analyse rapide: ${error}`);
+    analysis.errors.push(`Erreur analyse rapide: ${toErrorMessage(error)}`);
     analysis.formattedForAI = generateErrorMessage(searchQuery, analysis.errors);
   }
   
